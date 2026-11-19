@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+import io
 
 BRAND = "Varth Capital"
 
@@ -48,9 +49,9 @@ AGE_MIN, AGE_MAX = 18, 65
 #   Premium (Incl. GST) = Premium (Excl. GST) + GST Amount
 # ============================================
 def compute_premium_breakdown(base_rate, sum_assured, gst_pct=GST_RATE_FIXED):
-    premium_excl_gst = base_rate * (sum_assured / 100000.0)
-    gst_amount = premium_excl_gst * (gst_pct / 100.0)
-    premium_incl_gst = premium_excl_gst + gst_amount
+    premium_excl_gst = round(base_rate * (sum_assured / 100000.0))
+    gst_amount = round(premium_excl_gst * (gst_pct / 100.0), 2)
+    premium_incl_gst = round(premium_excl_gst + gst_amount, 2)
     return premium_excl_gst, gst_amount, premium_incl_gst
 
 
@@ -243,156 +244,342 @@ if st.button("Get Rate", type="primary"):
 st.divider()
 
 # ============================================
-# EXCEL UPLOAD SECTION
+# GROUP PREMIUM CALCULATOR  (works on the Varth Capital template)
+# Person downloads the template -> fills it -> uploads it here ->
+# the same file comes back with Age, Rate, Premium, GST, Total and
+# Tenure-in-months filled in. The template layout is left untouched.
 # ============================================
-head_col, info_col = st.columns([4, 1])
+TEMPLATE_FILE = "Premium_Template.xlsx"   # keep this file in the GitHub repo
+
+head_col, dl_col = st.columns([3, 1])
 with head_col:
     st.subheader("📂 Group Premium Calculator")
-with info_col:
-    with st.popover("ℹ️ Excel format", use_container_width=True):
-        st.markdown("**Required columns**")
-        st.markdown(
-            "- **Name**\n"
-            "- **Age**\n"
-            "- **Sum Assured** (or **Loan Outstanding** if blank)\n"
-            "- **Tenure** (in years)"
+with dl_col:
+    tpl_path = resolve_file(TEMPLATE_FILE)
+    if tpl_path:
+        with open(tpl_path, "rb") as f:
+            st.download_button(
+                "⬇ Download Template", data=f.read(),
+                file_name="Varth_Capital_Premium_Template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+    else:
+        st.warning(f"'{TEMPLATE_FILE}' not found in the repo.")
+
+with st.expander("ℹ️ How to use"):
+    st.markdown(
+        "1. Download the template, fill it in (columns marked **Mandatory**), and upload it below.\n"
+        "2. **Loan Type** in each row decides the rate table: Vehicle Loan / LAP / Personal Loan.\n"
+        "3. **Sum Assured** used = *Loan Outstanding Amount*; if that is blank, *Sum Assured* is used.\n"
+        "4. **Age** is calculated from Date of Birth. **Tenure** is entered in years "
+        "(*Cover Tenure In Years*) and the months columns are filled automatically.\n"
+        "5. The same file comes back with Rate, Premium (Excl. GST), GST amount and Total Premium filled in. "
+        "Rows that fail a check are left blank, with the reason in the last column."
+    )
+    st.markdown(
+        "| Loan Type | Sum Assured | Tenure | Age |\n|---|---|---|---|\n" +
+        "\n".join(
+            f"| {k} | ₹{v['sa_min']:,} – ₹{v['sa_max']:,} | {v['t_min']} – {v['t_max']} yrs | {AGE_MIN} – {AGE_MAX} |"
+            for k, v in SEGMENTS.items()
         )
-        st.markdown("**Limits for current selection**")
-        st.markdown(
-            f"- Loan Type: **{loan_type}**\n"
-            f"- Sum Assured: ₹{sa_min:,} – ₹{sa_max:,}\n"
-            f"- Tenure: {min_tenure} – {max_tenure} yrs\n"
-            f"- Age: {AGE_MIN} – {AGE_MAX}"
-        )
-        st.caption("Each row uses its own Sum Assured. Rows outside the limits show an ❌ status.")
+    )
+
+
+def norm_key(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def build_header_map(ws):
+    m = {}
+    for c in ws[1]:
+        if c.value is not None and str(c.value).strip() != "":
+            m.setdefault(norm_key(c.value), []).append(c.column)
+    return m
+
+
+def cols_for(hmap, key, prefix=False):
+    out = []
+    for k, v in hmap.items():
+        if (k.startswith(key) if prefix else k == key):
+            out.extend(v)
+    return sorted(out)
+
+
+def first_value(row_vals, cols):
+    for c in cols:
+        v = row_vals.get(c)
+        if v is not None and str(v).strip() != "":
+            return v
+    return None
+
+
+def to_num(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v = v.replace(",", "").replace("₹", "").strip()
+        if v == "":
+            return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
+def to_date(v):
+    import datetime as dt
+    if v is None:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.date()
+    if isinstance(v, dt.datetime):
+        return v.date()
+    if isinstance(v, dt.date):
+        return v
+    if isinstance(v, (int, float)):
+        try:
+            return (pd.Timestamp("1899-12-30") + pd.Timedelta(days=float(v))).date()
+        except Exception:
+            return None
+    s = str(v).strip()
+    if not s:
+        return None
+    for f in ("%d%b%Y", "%d-%b-%Y", "%d %b %Y", "%d/%b/%Y", "%d/%m/%Y", "%d-%m-%Y",
+              "%d.%m.%Y", "%d%m%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return dt.datetime.strptime(s, f).date()
+        except Exception:
+            pass
+    return None
+
+
+def calc_age(dob, ref):
+    # Age as on last birthday
+    return ref.year - dob.year - ((ref.month, ref.day) < (dob.month, dob.day))
+
+
+def match_segment(v):
+    if v is None:
+        return None
+    n = norm_key(v)
+    if n in ("pl",) or "personal" in n:
+        return "Personal Loan"
+    if "lap" in n or "propert" in n:
+        return "LAP"
+    if "veh" in n or "vech" in n:
+        return "Vehicle Loan"
+    return None
+
+
+def is_marker_row(vals):
+    for v in vals:
+        if isinstance(v, str) and norm_key(v).startswith(("mandatory", "nonmandatory", "optional")):
+            return True
+    return False
+
+
+def clean_msg(e):
+    return str(e).replace("\n", " ")
+
 
 uploaded_file = st.file_uploader(
-    f"Upload Excel File for {loan_type}",
-    type=["xlsx"],
-    help="Rates are picked based on the Loan Type selected above."
+    "Upload the filled template", type=["xlsx"],
+    help="Use the template downloaded above. Keep the column headings as they are."
 )
 
 if uploaded_file is not None:
     try:
-        df = pd.read_excel(uploaded_file)
-        df.columns = [str(c).strip() for c in df.columns]
+        from openpyxl import load_workbook
+        from copy import copy
+        import datetime as dt
 
-        st.subheader("Uploaded Data Preview")
-        st.dataframe(df.head())
+        raw = uploaded_file.getvalue()
+        wb = load_workbook(io.BytesIO(raw))                    # keeps formatting; we write into this
+        wb_v = load_workbook(io.BytesIO(raw), data_only=True)  # values to read
+        ws, ws_v = wb.worksheets[0], wb_v.worksheets[0]
+        hmap = build_header_map(ws)
 
-        min_t, max_t = min_tenure, max_tenure
+        c_acct = cols_for(hmap, "loanaccountno", prefix=True)
+        c_name = cols_for(hmap, "nameofprimaryloanborrower", prefix=True)
+        c_type = cols_for(hmap, "loantype")
+        c_dob = cols_for(hmap, "dateofbirth", prefix=True)
+        c_os = cols_for(hmap, "loanoutstandingamount")
+        c_sa = cols_for(hmap, "sumassured")
+        c_disb = cols_for(hmap, "loandisbursementdate", prefix=True)
+        c_eff = cols_for(hmap, "membereffectivedate")
+        c_term_m = cols_for(hmap, "loanterminmonths")
+        c_term_y = cols_for(hmap, "loantermyear")
+        c_cov_m = cols_for(hmap, "covertenureinmonth", prefix=True)
+        c_cov_y = cols_for(hmap, "covertenureinyears", prefix=True)
+        c_age = cols_for(hmap, "mainmemberage")
+        c_rate = cols_for(hmap, "rate")
+        c_excl = cols_for(hmap, "premiumexclgst", prefix=True)
+        c_gst = cols_for(hmap, "gstamount")
+        c_incl = cols_for(hmap, "totalpremiuminclgst", prefix=True)
 
-        df_rates, tenure_map = load_rate_table(loan_type)
+        needed = {
+            "Loan Type": c_type, "Date of Birth": c_dob, "Sum Assured": c_sa,
+            "Cover Tenure In Years": c_cov_y, "Premium (Excl. GST)": c_excl,
+            "GST amount": c_gst, "Total Premium (incl GST)": c_incl,
+        }
+        missing = [k for k, v in needed.items() if not v]
+        if missing:
+            raise ValueError(
+                "This does not look like the template — missing column(s): " + ", ".join(missing)
+                + ". Please download the template again and use it as it is."
+            )
 
-        name_col = find_column(df, "Name")
-        age_col = find_column(df, "Age")
-        tenure_col = find_column(df, "Tenure")
-        sa_col, lo_col = find_sum_assured_columns(df)
+        # "Remarks" column added at the far right (template columns are untouched)
+        remarks_col = ws.max_column + 1
+        src = ws.cell(row=1, column=ws.max_column)
+        rc = ws.cell(row=1, column=remarks_col, value="Status / Remarks")
+        rc.font, rc.fill, rc.border, rc.alignment = copy(src.font), copy(src.fill), copy(src.border), copy(src.alignment)
+        ws.column_dimensions[rc.column_letter].width = 45
 
-        if not name_col or not age_col or not tenure_col:
-            raise ValueError("Excel must contain mandatory columns: Name, Age, and Tenure.")
-        if not sa_col and not lo_col:
-            raise ValueError("Excel must contain a Sum Assured column (e.g. 'Sum Assured', 'Sum Insured') or, failing that, a 'Loan Outstanding' column.")
+        def put(r, cols, value):
+            if cols:
+                ws.cell(row=r, column=cols[0], value=value)
 
-        df[age_col] = pd.to_numeric(df[age_col], errors='coerce')
-        df[tenure_col] = pd.to_numeric(df[tenure_col], errors='coerce')
-        if sa_col:
-            df[sa_col] = pd.to_numeric(df[sa_col], errors='coerce')
-        if lo_col:
-            df[lo_col] = pd.to_numeric(df[lo_col], errors='coerce')
+        rate_cache = {}
 
-        if df[tenure_col].dropna().median() > 30:
-            st.info("ℹ️ Tenure values look like months — auto-converting to years.")
-            df[tenure_col] = (df[tenure_col] / 12).round(0).astype('Int64')
-        else:
-            df[tenure_col] = df[tenure_col].round(0).astype('Int64')
+        def rates_for(seg):
+            if seg not in rate_cache:
+                try:
+                    rate_cache[seg] = load_rate_table(seg)
+                except Exception as e:
+                    rate_cache[seg] = e
+            if isinstance(rate_cache[seg], Exception):
+                raise rate_cache[seg]
+            return rate_cache[seg]
 
-        df[age_col] = df[age_col].round(0).astype('Int64')
+        records = []
+        for r in range(2, ws_v.max_row + 1):
+            vals = {c: ws_v.cell(row=r, column=c).value for c in range(1, ws_v.max_column + 1)}
+            if all(v is None or str(v).strip() == "" for v in vals.values()):
+                continue
+            if is_marker_row(vals.values()):
+                continue
 
-        premiums_excl_gst = []
-        gst_amounts = []
-        premiums_incl_gst = []
-        statuses = []
-        sa_used_list = []
-        for idx, row in df.iterrows():
+            seg = sa_used = age = ten_y = rate = lt_raw = None
+            excl = gst = incl = None
             try:
-                r_age = int(row[age_col]) if pd.notna(row[age_col]) else None
-                r_tenure = int(row[tenure_col]) if pd.notna(row[tenure_col]) else None
+                # ---- Loan type -> segment
+                lt_raw = first_value(vals, c_type)
+                seg = match_segment(lt_raw)
+                if seg is None:
+                    raise ValueError("Loan Type must be Vehicle Loan, LAP or Personal Loan")
+                cfg_r = SEGMENTS[seg]
 
-                r_sa = None
-                if sa_col and pd.notna(row[sa_col]):
-                    r_sa = float(row[sa_col])
-                elif lo_col and pd.notna(row[lo_col]):
-                    r_sa = float(row[lo_col])
+                # ---- Tenure (years) -> months written back automatically
+                ty = to_num(first_value(vals, c_cov_y))
+                if ty is None:
+                    tm = to_num(first_value(vals, c_cov_m))
+                    if tm is not None:
+                        ty = tm / 12.0
+                if ty is None:
+                    ty = to_num(first_value(vals, c_term_y))
+                if ty is not None:
+                    put(r, c_cov_y, round(ty, 2) if ty != round(ty) else int(round(ty)))
+                    put(r, c_cov_m, int(round(ty * 12)))
+                ly = to_num(first_value(vals, c_term_y))
+                if ly is not None:
+                    put(r, c_term_m, int(round(ly * 12)))
 
-                if r_sa is None:
-                    raise ValueError("Sum Assured / Loan Outstanding value missing")
-                if r_age is None or r_age < AGE_MIN or r_age > AGE_MAX:
-                    raise ValueError(f"Age must be between {AGE_MIN} and {AGE_MAX}")
-                if r_tenure is None or r_tenure < min_t or r_tenure > max_t:
-                    raise ValueError(f"Tenure must be between {min_t} and {max_t} yrs")
-                if r_sa < sa_min or r_sa > sa_max:
-                    raise ValueError(f"Sum Assured must be between ₹{sa_min:,} and ₹{sa_max:,}")
+                # ---- Sum Assured: Loan Outstanding first, else Sum Assured
+                os_v = to_num(first_value(vals, c_os))
+                sa_v = to_num(first_value(vals, c_sa))
+                sa_used = os_v if os_v is not None else sa_v
+                if sa_used is None:
+                    raise ValueError("Loan Outstanding / Sum Assured missing")
 
-                r_base = get_rate(df_rates, tenure_map, r_age, r_tenure)
-                r_excl, r_gst, r_incl = compute_premium_breakdown(r_base, r_sa)
-                premiums_excl_gst.append(round(r_excl))
-                gst_amounts.append(round(r_gst, 2))
-                premiums_incl_gst.append(round(r_incl, 2))
-                statuses.append("✅")
-                sa_used_list.append(r_sa)
+                # ---- Age from Date of Birth (as on Member Effective / Disbursement date, else today)
+                dob_raw = first_value(vals, c_dob)
+                dob = to_date(dob_raw)
+                if dob is not None:
+                    ref = to_date(first_value(vals, c_eff)) or to_date(first_value(vals, c_disb)) or dt.date.today()
+                    age = calc_age(dob, ref)
+                else:
+                    age = to_num(first_value(vals, c_age))
+                    if age is None:
+                        raise ValueError("Date of Birth missing or not readable")
+                    age = int(age)
+                put(r, c_age, age)
+
+                # ---- Limit checks
+                if ty is None:
+                    raise ValueError("Cover Tenure missing")
+                if abs(ty - round(ty)) > 1e-9:
+                    raise ValueError("Tenure must be in whole years")
+                ten_y = int(round(ty))
+                if age < AGE_MIN or age > AGE_MAX:
+                    raise ValueError(f"Age {age} outside {AGE_MIN}–{AGE_MAX}")
+                if ten_y < cfg_r["t_min"] or ten_y > cfg_r["t_max"]:
+                    raise ValueError(f"Tenure {ten_y} yrs outside {cfg_r['t_min']}–{cfg_r['t_max']} yrs for {seg}")
+                if sa_used < cfg_r["sa_min"] or sa_used > cfg_r["sa_max"]:
+                    raise ValueError(f"Amount ₹{sa_used:,.0f} outside ₹{cfg_r['sa_min']:,}–₹{cfg_r['sa_max']:,} for {seg}")
+
+                # ---- Rate + premium
+                df_r, t_map = rates_for(seg)
+                rate = get_rate(df_r, t_map, age, ten_y)
+                excl, gst, incl = compute_premium_breakdown(rate, sa_used)
+                put(r, c_rate, rate)
+                put(r, c_excl, excl)
+                put(r, c_gst, gst)
+                put(r, c_incl, incl)
+                status = "OK"
             except Exception as e:
-                premiums_excl_gst.append(None)
-                gst_amounts.append(None)
-                premiums_incl_gst.append(None)
-                statuses.append(f"❌ {e}")
-                sa_used_list.append(None)
+                status = clean_msg(e)
+                for cols in (c_rate, c_excl, c_gst, c_incl):
+                    put(r, cols, None)
+                excl = gst = incl = None
 
-        df["Sum Assured Used"] = sa_used_list
-        df["Premium (Excl. GST)"] = premiums_excl_gst
-        df[f"GST Amount ({GST_RATE_FIXED:.0f}%)"] = gst_amounts
-        df["Premium (Incl. GST)"] = premiums_incl_gst
-        df["Status"] = statuses
+            ws.cell(row=r, column=remarks_col, value=status)
+            acct = first_value(vals, c_acct)
+            name = first_value(vals, c_name)
+            records.append({
+                "Row": r,
+                "Loan Account No.": acct,
+                "Borrower": name,
+                "Loan Type": seg or lt_raw,
+                "Age": age,
+                "Tenure (yrs)": ten_y,
+                "Amount Used (₹)": sa_used,
+                "Rate": rate,
+                "Premium (Excl. GST)": excl,
+                "GST": gst,
+                "Premium (Incl. GST)": incl,
+                "Status": "✅" if status == "OK" else f"❌ {status}",
+            })
 
-        display_sa_col = sa_col if sa_col else lo_col
-        core_cols = [
-            name_col, age_col, tenure_col, display_sa_col, "Sum Assured Used",
-            "Premium (Excl. GST)", f"GST Amount ({GST_RATE_FIXED:.0f}%)", "Premium (Incl. GST)"
-        ]
-        extra_cols = [c for c in df.columns if c not in core_cols]
-        df = df[core_cols + extra_cols]
+        if not records:
+            st.warning("No data rows found in the uploaded file.")
+        else:
+            res = pd.DataFrame(records)
+            ok = res["Status"] == "✅"
+            t_excl = pd.to_numeric(res["Premium (Excl. GST)"], errors="coerce").sum()
+            t_gst = pd.to_numeric(res["GST"], errors="coerce").sum()
+            t_incl = pd.to_numeric(res["Premium (Incl. GST)"], errors="coerce").sum()
 
-        total_excl_gst = pd.to_numeric(pd.Series(premiums_excl_gst), errors='coerce').sum()
-        total_gst = pd.to_numeric(pd.Series(gst_amounts), errors='coerce').sum()
-        total_incl_gst = pd.to_numeric(pd.Series(premiums_incl_gst), errors='coerce').sum()
+            st.caption(f"{int(ok.sum())} row(s) calculated · {int((~ok).sum())} row(s) with errors")
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                st.metric("💰 Total Premium (Excl. GST)", f"₹ {round(t_excl):,}")
+            with t2:
+                st.metric(f"💰 Total GST ({GST_RATE_FIXED:.0f}%)", f"₹ {t_gst:,.2f}")
+            with t3:
+                st.metric("💰 Grand Total (Incl. GST)", f"₹ {t_incl:,.2f}")
 
-        t1, t2, t3 = st.columns(3)
-        with t1:
-            st.metric("💰 Total Premium (Excl. GST)", f"₹ {round(total_excl_gst):,}")
-        with t2:
-            st.metric(f"💰 Total GST ({GST_RATE_FIXED:.0f}%)", f"₹ {total_gst:,.2f}")
-        with t3:
-            st.metric("💰 Grand Total Premium (Incl. GST)", f"₹ {total_incl_gst:,.2f}")
+            st.subheader("Result")
+            st.dataframe(res, use_container_width=True, hide_index=True)
 
-        st.subheader("Rate Lookup Output")
-        st.dataframe(df, use_container_width=True)
-
-        total_row = {c: "" for c in df.columns}
-        total_row[name_col] = "TOTAL PREMIUM"
-        total_row["Premium (Excl. GST)"] = round(total_excl_gst)
-        total_row[f"GST Amount ({GST_RATE_FIXED:.0f}%)"] = round(total_gst, 2)
-        total_row["Premium (Incl. GST)"] = round(total_incl_gst, 2)
-        df_out = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
-
-        output_file = "Varth_Capital_Premium_Output.xlsx"
-        df_out.to_excel(output_file, index=False)
-
-        with open(output_file, "rb") as file:
+            buf = io.BytesIO()
+            wb.save(buf)
             st.download_button(
-                label="⬇ Download Output Excel",
-                data=file,
-                file_name=output_file,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                label="⬇ Download Filled Excel",
+                data=buf.getvalue(),
+                file_name="Varth_Capital_Premium_Output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
     except Exception as e:
