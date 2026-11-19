@@ -169,56 +169,76 @@ st.divider()
 
 # ============================================
 # MANUAL SECTION
+# Inputs are not clamped: whatever is typed is validated on "Get Rate".
+# Out-of-range values show "Not available" instead of a premium.
 # ============================================
 st.subheader("🔢 Individual Premium Calculator")
 
 col3, col4 = st.columns(2)
 with col3:
     age = st.number_input(
-        "Enter Age", min_value=AGE_MIN, max_value=AGE_MAX, value=30, step=1,
+        "Enter Age", value=None, step=1, placeholder=f"{AGE_MIN} – {AGE_MAX}",
+        help=f"Age {AGE_MIN} – {AGE_MAX}.",
         key=f"age_manual_{loan_type}"
     )
 with col4:
     tenure = st.number_input(
-        "Enter Tenure (Years)",
-        min_value=min_tenure,
-        max_value=max_tenure,
-        value=min_tenure,
-        step=1,
+        "Enter Tenure (Years)", value=None, step=1,
+        placeholder=f"{min_tenure} – {max_tenure}",
         help=f"Tenure in years ({min_tenure} – {max_tenure}).",
         key=f"tenure_manual_{loan_type}"
     )
 
 sum_assured_manual = st.number_input(
-    "Select Sum Assured (₹)",
-    min_value=sa_min,
-    max_value=sa_max,
-    value=sa_min,
-    step=1,
+    "Select Sum Assured (₹)", value=None, step=1,
+    placeholder=f"{sa_min:,} – {sa_max:,}",
     help=f"Enter the exact Sum Assured for this member (₹{sa_min:,} – ₹{sa_max:,}).",
     key=f"sa_manual_{loan_type}"
 )
 
+NA = "Not available"
+
 if st.button("Get Rate", type="primary"):
-    try:
-        df_rates, tenure_map = load_rate_table(loan_type)
-        base_rate = get_rate(df_rates, tenure_map, age, tenure)
-        premium_excl_gst, gst_amount, premium_incl_gst = compute_premium_breakdown(
-            base_rate, sum_assured_manual
-        )
-        st.success(
-            f"✅ {loan_type} | Age {age} | Tenure {tenure} yrs | "
-            f"Sum Assured ₹{sum_assured_manual:,} | GST {GST_RATE_FIXED:.0f}%"
-        )
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            st.metric("Premium (Excl. GST)", f"₹ {round(premium_excl_gst):,}")
-        with m2:
-            st.metric(f"GST Amount ({GST_RATE_FIXED:.0f}%)", f"₹ {gst_amount:,.2f}")
-        with m3:
-            st.metric("Premium (Incl. GST)", f"₹ {premium_incl_gst:,.2f}")
-    except Exception as e:
-        st.error(f"Error: {e}")
+    if age is None or tenure is None or sum_assured_manual is None:
+        st.warning("Please enter Age, Tenure and Sum Assured.")
+    else:
+        problems = []
+        if age < AGE_MIN or age > AGE_MAX:
+            problems.append(f"Age must be between {AGE_MIN} and {AGE_MAX}")
+        if tenure < min_tenure or tenure > max_tenure:
+            problems.append(f"Tenure must be between {min_tenure} and {max_tenure} yrs")
+        if sum_assured_manual < sa_min or sum_assured_manual > sa_max:
+            problems.append(f"Sum Assured must be between ₹{sa_min:,} and ₹{sa_max:,}")
+
+        if problems:
+            st.error("❌ Premium not available for " + loan_type + ": " + "; ".join(problems) + ".")
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Premium (Excl. GST)", NA)
+            with m2:
+                st.metric(f"GST Amount ({GST_RATE_FIXED:.0f}%)", NA)
+            with m3:
+                st.metric("Premium (Incl. GST)", NA)
+        else:
+            try:
+                df_rates, tenure_map = load_rate_table(loan_type)
+                base_rate = get_rate(df_rates, tenure_map, int(age), int(tenure))
+                premium_excl_gst, gst_amount, premium_incl_gst = compute_premium_breakdown(
+                    base_rate, sum_assured_manual
+                )
+                st.success(
+                    f"✅ {loan_type} | Age {int(age)} | Tenure {int(tenure)} yrs | "
+                    f"Sum Assured ₹{int(sum_assured_manual):,} | GST {GST_RATE_FIXED:.0f}%"
+                )
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Premium (Excl. GST)", f"₹ {round(premium_excl_gst):,}")
+                with m2:
+                    st.metric(f"GST Amount ({GST_RATE_FIXED:.0f}%)", f"₹ {gst_amount:,.2f}")
+                with m3:
+                    st.metric("Premium (Incl. GST)", f"₹ {premium_incl_gst:,.2f}")
+            except Exception as e:
+                st.error(f"❌ Premium not available: {e}")
 
 st.divider()
 
