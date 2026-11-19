@@ -4,7 +4,7 @@ import os
 import re
 import io
 
-BRAND = "Varth Capital"
+BRAND = "Varth Capital GCL Premium Calculator"
 
 st.set_page_config(
     page_title=f"{BRAND} – Premium Calculator",
