@@ -196,7 +196,7 @@ sum_assured_manual = st.number_input(
     key=f"sa_manual_{loan_type}"
 )
 
-NA = "Not available"
+NA = "—"  # shown in the premium boxes when the inputs are outside the allowed limits
 
 if st.button("Get Rate", type="primary"):
     if age is None or tenure is None or sum_assured_manual is None:
@@ -211,7 +211,7 @@ if st.button("Get Rate", type="primary"):
             problems.append(f"Sum Assured must be between ₹{sa_min:,} and ₹{sa_max:,}")
 
         if problems:
-            st.error("❌ Premium not available for " + loan_type + ": " + "; ".join(problems) + ".")
+            st.warning("⚠️ " + " · ".join(problems))
             m1, m2, m3 = st.columns(3)
             with m1:
                 st.metric("Premium (Excl. GST)", NA)
