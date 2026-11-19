@@ -270,7 +270,8 @@ with dl_col:
 with st.expander("ℹ️ How to use"):
     st.markdown(
         "1. Download the template, fill it in (columns marked **Mandatory**), and upload it below.\n"
-        "2. **Loan Type** in each row decides the rate table: Vehicle Loan / LAP / Personal Loan.\n"
+        "2. **Loan Type** in each row decides the rate table: Vehicle Loan / LAP / Personal Loan. "
+        "If it is left blank, the Loan Type selected at the top of the page is used.\n"
         "3. **Sum Assured** used = *Loan Outstanding Amount*; if that is blank, *Sum Assured* is used.\n"
         "4. **Age** is calculated from Date of Birth. **Tenure** is entered in years "
         "(*Cover Tenure In Years*) and the months columns are filled automatically.\n"
@@ -466,9 +467,14 @@ if uploaded_file is not None:
             try:
                 # ---- Loan type -> segment
                 lt_raw = first_value(vals, c_type)
-                seg = match_segment(lt_raw)
-                if seg is None:
-                    raise ValueError("Loan Type must be Vehicle Loan, LAP or Personal Loan")
+                if lt_raw is None:
+                    seg = loan_type  # Loan Type blank in the row -> use the one selected at the top
+                else:
+                    seg = match_segment(lt_raw)
+                    if seg is None:
+                        raise ValueError(
+                            f"Loan Type '{str(lt_raw).strip()}' not recognised - use Vehicle Loan, LAP or Personal Loan"
+                        )
                 cfg_r = SEGMENTS[seg]
 
                 # ---- Tenure (years) -> months written back automatically
