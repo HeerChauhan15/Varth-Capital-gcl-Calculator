@@ -21,9 +21,7 @@ GST_RATE_FIXED = 18.0
 # ============================================
 # SEGMENT CONFIG  (only 3 segments)
 # "file" = Excel file name in the GitHub repo (extension optional-tolerant).
-# Inside each file, the sheet for Level / Reducing is picked automatically
-# (sheet name containing "level" / "reducing"); if the file has only one
-# sheet, that sheet is used.
+# The first sheet of each file is used for rates.
 # ============================================
 SEGMENTS = {
     "Vehicle Loan": {
@@ -75,19 +73,7 @@ def resolve_file(fname):
     return None
 
 
-def pick_sheet(path, cover_type):
-    names = pd.ExcelFile(path).sheet_names
-    if len(names) == 1:
-        return names[0]
-    for n in names:
-        if cover_type.lower() in n.lower():
-            return n
-    raise ValueError(
-        f"Could not find a '{cover_type}' sheet in '{path}'. Sheets found: {', '.join(names)}"
-    )
-
-
-def load_rate_table(cover_type, loan_type):
+def load_rate_table(loan_type):
     fname = SEGMENTS[loan_type]["file"]
     path = resolve_file(fname)
     if path is None:
@@ -95,7 +81,7 @@ def load_rate_table(cover_type, loan_type):
             f"File not found: '{fname}' — Please make sure this file is in the GitHub repo."
         )
 
-    sheet = pick_sheet(path, cover_type)
+    sheet = 0  # first sheet of the file
     raw = pd.read_excel(path, sheet_name=sheet, header=None)
 
     header_row = None
@@ -165,18 +151,16 @@ def find_sum_assured_columns(df):
 # ============================================
 # DROPDOWNS
 # ============================================
-col1, col2 = st.columns(2)
+col1, _ = st.columns([1, 1])
 with col1:
     loan_type = st.selectbox("Select Loan Type", list(SEGMENTS.keys()))
-with col2:
-    cover_type = st.selectbox("Select Type of Cover", ["Level", "Reducing"])
 
 cfg = SEGMENTS[loan_type]
 sa_min, sa_max = cfg["sa_min"], cfg["sa_max"]
 min_tenure, max_tenure = cfg["t_min"], cfg["t_max"]
 
 st.caption(
-    f"**{loan_type} · {cover_type} cover** — "
+    f"**{loan_type}** — "
     f"Sum Assured ₹{sa_min:,} – ₹{sa_max:,} · Tenure {min_tenure} – {max_tenure} yrs · "
     f"Age {AGE_MIN} – {AGE_MAX}"
 )
@@ -217,13 +201,13 @@ sum_assured_manual = st.number_input(
 
 if st.button("Get Rate", type="primary"):
     try:
-        df_rates, tenure_map = load_rate_table(cover_type, loan_type)
+        df_rates, tenure_map = load_rate_table(loan_type)
         base_rate = get_rate(df_rates, tenure_map, age, tenure)
         premium_excl_gst, gst_amount, premium_incl_gst = compute_premium_breakdown(
             base_rate, sum_assured_manual
         )
         st.success(
-            f"✅ {loan_type} | {cover_type} Cover | Age {age} | Tenure {tenure} yrs | "
+            f"✅ {loan_type} | Age {age} | Tenure {tenure} yrs | "
             f"Sum Assured ₹{sum_assured_manual:,} | GST {GST_RATE_FIXED:.0f}%"
         )
         m1, m2, m3 = st.columns(3)
@@ -255,7 +239,7 @@ with info_col:
         )
         st.markdown("**Limits for current selection**")
         st.markdown(
-            f"- Loan Type: **{loan_type}** · Cover: **{cover_type}**\n"
+            f"- Loan Type: **{loan_type}**\n"
             f"- Sum Assured: ₹{sa_min:,} – ₹{sa_max:,}\n"
             f"- Tenure: {min_tenure} – {max_tenure} yrs\n"
             f"- Age: {AGE_MIN} – {AGE_MAX}"
@@ -263,9 +247,9 @@ with info_col:
         st.caption("Each row uses its own Sum Assured. Rows outside the limits show an ❌ status.")
 
 uploaded_file = st.file_uploader(
-    f"Upload Excel File for {loan_type} · {cover_type} cover",
+    f"Upload Excel File for {loan_type}",
     type=["xlsx"],
-    help="Rates are picked based on the Loan Type and Type of Cover selected above."
+    help="Rates are picked based on the Loan Type selected above."
 )
 
 if uploaded_file is not None:
@@ -278,7 +262,7 @@ if uploaded_file is not None:
 
         min_t, max_t = min_tenure, max_tenure
 
-        df_rates, tenure_map = load_rate_table(cover_type, loan_type)
+        df_rates, tenure_map = load_rate_table(loan_type)
 
         name_col = find_column(df, "Name")
         age_col = find_column(df, "Age")
