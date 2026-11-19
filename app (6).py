@@ -592,4 +592,4 @@ if uploaded_file is not None:
         st.error(f"Error: {e}")
 
 st.divider()
-st.caption("Powered by PolicyGrace")
+st.caption("Powered by Policygrace")
